@@ -449,7 +449,7 @@
           <button id="header-approval-badge" class="btn btn-warning hidden" style="padding:3px 10px; font-size:11px;" onclick="app.showPendingTasks()" title="Onayınızı bekleyen görevler">⏳ 0</button>
           <button id="header-delete-badge" class="btn btn-danger hidden" style="padding:3px 10px; font-size:11px;" onclick="app.showDeleteRequests()" title="Silme talebi bekleyen görevler">🗑 0</button>
           <p id="user-display">Giriş Bekleniyor...</p>
-          <button class="btn btn-danger header-account-btn" onclick="localStorage.removeItem('dnm_currentUser'); location.reload();">🚪 ÇIKIŞ YAP</button>
+          <button class="btn btn-danger header-account-btn" onclick="app.logout()">🚪 ÇIKIŞ YAP</button>
         </div>
       </div>
     </header>
@@ -901,14 +901,14 @@
     // Sistem sıfırlandığında (veya yerel kopyaların geçersiz kılınması gerektiğinde) bu değeri
     // değiştirip HTML'i yükleyin. Sayfayı ilk açan her bilgisayar, eski yerel veri kopyasını,
     // bekleyen gönderimlerini ve açık oturumunu bir kez kendiliğinden siler. Cihaz kodu korunur.
-    const APP_DATA_VERSION = '2026-11-01-v1';
+    const APP_DATA_VERSION = '2026-10-19-tenant-v1';
     const DATA_VERSION_KEY = 'dnm_gumruk_data_version_v1';
     (function applyDataVersion() {
         try {
             if (localStorage.getItem(DATA_VERSION_KEY) === APP_DATA_VERSION) return;
             ['dnm_gumruk_final_v60', 'dnm_gumruk_pending_sync_v1', 'dnm_gumruk_pending_task_versions_v1',
              'dnm_gumruk_cloud_cursor_v1', 'dnm_gumruk_cloud_revision_v1', 'dnm_gumruk_last_cloud_write_at',
-             'dnm_gumruk_last_cloud_read_at', 'dnm_currentUser'].forEach(key => localStorage.removeItem(key));
+             'dnm_gumruk_last_cloud_read_at', 'dnm_currentUser', 'dnm_gumruk_session_token'].forEach(key => localStorage.removeItem(key));
             Object.keys(localStorage).filter(key => key.indexOf('dnm_gumruk_last_role_') === 0)
                 .forEach(key => localStorage.removeItem(key));
             window.__localDbWipePending = true;
@@ -918,7 +918,7 @@
     const app = {
         lastLocalChange: 0,
         CLOUD_URL: 'https://script.google.com/macros/s/AKfycbytQ3pDV8oTVPsJY-KOry_ZOWKAwzLaKpYi9_aoxx1U7jZ0yS99irXmn5XiKfMbIpHr3g/exec',
-        CLOUD_TOKEN: 'Yolluk_yonetım-panelı-Gumruk2026_GizliAnahtar!123',
+        SESSION_KEY: 'dnm_gumruk_session_token',
         DB_KEY: 'dnm_gumruk_final_v60',
         PENDING_KEY: 'dnm_gumruk_pending_sync_v1',
         PENDING_TASKS_KEY: 'dnm_gumruk_pending_task_versions_v1',
@@ -1526,156 +1526,96 @@ addLog(tip, detay, ref = "-") {
             XLSX.utils.book_append_sheet(wb, ws, "Sistem_Loglari");
             XLSX.writeFile(wb, `Sistem_Log_Raporu_${new Date().toISOString().slice(0,10)}.xlsx`);
         },
-downloadBackup(fileName) {
-            const blob = new Blob([JSON.stringify(this.db)], { type:'application/json;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = fileName;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
+        downloadBackup(fileName, data) {
+            const blob = new Blob([JSON.stringify(data)], {type:'application/json;charset=utf-8'});
+            const url = URL.createObjectURL(blob), link = document.createElement('a');
+            link.href = url; link.download = fileName; document.body.appendChild(link); link.click(); link.remove();
             setTimeout(() => URL.revokeObjectURL(url), 2000);
             localStorage.setItem('dnm_gumruk_last_backup_at', new Date().toISOString());
         },
 
-        hardBackup() {
-            if (!this.requireMega('Yedekleme işlemini yalnızca Mega Admin yapabilir.')) return;
-            this.downloadBackup(`Kayseri_Gumruk_Hard_Yedek_${new Date().toISOString().slice(0,10)}.json`);
-            this.addLog("Sistem Yedeği Alındı", "Tüm sistem veritabanı bilgisayara manuel olarak .json formatında indirildi.");
-            alert("Sistemin tam anlık kopyası bilgisayarınıza indirildi!");
+        async chooseOperationTarget(label) {
+            if (!this.user || !this.user.mega) return this.aktifGumruk;
+            const list = this._root.gumrukler || [];
+            const choices = list.map(g => String(g.kod || g.id) + ' (' + g.id + ')').join('\n');
+            const typed = prompt(label + ' için hedef gümrük kodunu/ID değerini yazın; tüm gümrükler için TÜMÜ yazın:\n\n' + choices, this.aktifGumrukKod());
+            if (typed === null) return null;
+            const value = typed.trim();
+            if (value.toLocaleUpperCase('tr-TR') === 'TÜMÜ' || value.toUpperCase() === 'ALL') return 'ALL';
+            const found = list.find(g => String(g.id).toLocaleLowerCase('tr-TR') === value.toLocaleLowerCase('tr-TR') || String(g.kod).toLocaleLowerCase('tr-TR') === value.toLocaleLowerCase('tr-TR'));
+            if (!found) { alert('Yazılan gümrük bulunamadı.'); return null; }
+            return found.id;
         },
 
-        // Yalnızca Admin: önce tam yedek indirir, sonra personel / görev / izin / log kayıtlarını siler.
-        // Korunanlar: kullanıcı hesapları, yolluk limit ve kesim ayarları, hizmet ücret kalemleri.
-        resetSystem() {
-            if (!this.user || !this.user.mega) return alert('Sistemi yalnızca Mega Admin sıfırlayabilir.');
-            if (this.simulationMode) return alert('Simülasyon açıkken sistem sıfırlanamaz. Önce simülasyonu uygulayın veya iptal edin.');
-            const db = this._root;
-            const ozet = `Görev: ${(db.kayitlar || []).length}\nPersonel: ${(db.personeller || []).length}\nİzin/Rapor: ${(db.izinler || []).length}\nLog kaydı: ${(db.logs || []).length}`;
-            if (!confirm(`⚠️ SİSTEM SIFIRLAMA\n\nSilinecek kayıtlar (TÜM gümrükler):\n${ozet}\n\nÖnce bu verilerin tam yedeği bilgisayarınıza indirilecek, ardından kayıtlar silinip tüm kullanıcılar için buluta gönderilecektir.\n\nKorunacaklar: kullanıcı hesapları, yolluk limit/kesim ayarları, hizmet ücret kalemleri.\n\nDevam etmek istiyor musunuz?`)) return;
-            const typed = prompt('Bu işlem tüm kullanıcılar için geçerlidir.\nOnaylamak için büyük harfle SIFIRLA yazın:');
-            if (typed === null || typed.trim() !== 'SIFIRLA') return alert('Onay metni hatalı. Sıfırlama iptal edildi, hiçbir veri silinmedi.');
-
-            const now = new Date().toISOString();
+        async hardBackup() {
+            if (!this.user || !['Admin','Mega Admin'].includes(this.user.rolEtiketi || this.user.rol)) return alert('Yedek indirmeyi yalnızca Admin kullanabilir.');
+            const target = await this.chooseOperationTarget('Yedek indirme');
+            if (!target) return;
             try {
-                this.downloadBackup(`Kayseri_Gumruk_Sifirlama_Oncesi_Yedek_${now.replace(/[:.]/g, '-')}.json`);
-            } catch (error) {
-                console.error('Sıfırlama öncesi yedek hatası:', error);
-                return alert('Yedek alınamadığı için sıfırlama iptal edildi. Hiçbir veri silinmedi.');
-            }
-            if (!confirm('Yedek dosyası indirildi.\n\nİndirilenler klasöründe "Kayseri_Gumruk_Sifirlama_Oncesi_Yedek_…json" dosyasını gördüyseniz TAMAM\'a basın.\nSilme işlemi bundan sonra başlayacaktır.')) {
-                return alert('Sıfırlama iptal edildi. Hiçbir veri silinmedi.');
-            }
+                this.setSyncStatus('Yedek sunucudan alınıyor…');
+                const result = await this.apiRequest('backup.export', {gumrukId:target});
+                const code = target === 'ALL' ? 'TUMU' : (((this._root.gumrukler || []).find(g => g.id === target) || {}).kod || target);
+                this.downloadBackup('Gumruk_Yedegi_' + code + '_' + new Date().toISOString().slice(0,10) + '.json', result.backup);
+                this.addLog('Gümrük Yedeği Alındı', code + ' kapsamındaki tenant yedeği indirildi.');
+                alert(target === 'ALL' ? 'Tüm gümrüklerin ayrı tenant verilerini içeren yedek indirildi.' : code + ' gümrüğünün yedeği indirildi.');
+            } catch (error) { alert(error.message || 'Yedek alınamadı.'); }
+        },
 
-            // Silinen görevlerin diğer cihazlardaki yerel kopyalardan geri dirilmesini önle.
-            const tombstones = new Map();
-            (db.deletedTaskIds || []).forEach(item => {
-                const value = typeof item === 'string' ? { id:item, deletedAt:'1970-01-01T00:00:00.000Z' } : item;
-                if (value && value.id) tombstones.set(String(value.id), value);
-            });
-            (db.kayitlar || []).forEach(task => {
-                const id = String(task.id || (task.ref ? 'legacy:' + task.ref : ''));
-                if (id) tombstones.set(id, { id, deletedAt:now });
-            });
-
-            const kisiIsaretleri = new Map();
-            (db.deletedPersonIds || []).forEach(item => { if (item && item.id) kisiIsaretleri.set(String(item.id), item); });
-            (db.personeller || []).forEach(person => { const id = this.personKey(person); if (id) kisiIsaretleri.set(id, { id, deletedAt: now }); });
-            db.deletedPersonIds = Array.from(kisiIsaretleri.values());
-            db.silinenGorevler = [];
-            db.kayitlar = [];
-            db.personeller = [];
-            db.izinler = [];
-            db.logs = [];
-            db.deletedTaskIds = Array.from(tombstones.values());
-            Object.values(db.gumrukAyarlari || {}).forEach(a => { a.uyariAyarlari = { kapaliAylar: [], tamamenKapali: false }; });
-            db.sistemSifirlamaZamani = now;
-            this.selectedPs = [];
-            this.poolMode = false;
-            this.addLog('Sistem Sıfırlandı', `${this.user.user} tarafından sistem sıfırlandı. Silinen: ${ozet.replace(/\n/g, ', ')}. İşlem öncesi yedek bilgisayara indirildi.`);
-            this.closeAdminManagement();
-            this.save();
-            alert('Sistem sıfırlandı. Veriler arka planda buluta gönderiliyor.\nİşlem öncesi yedek dosyanızı güvenle saklayın.');
+        async resetSystem() {
+            if (!this.user || !['Admin','Mega Admin'].includes(this.user.rolEtiketi || this.user.rol)) return alert('Sıfırlama talebini yalnızca Admin başlatabilir.');
+            if (this.simulationMode) return alert('Simülasyon açıkken sıfırlama yapılamaz.');
+            const target = await this.chooseOperationTarget('Sıfırlama');
+            if (!target) return;
+            const label = target === 'ALL' ? 'TÜMÜ' : (((this._root.gumrukler || []).find(g => g.id === target) || {}).kod || target);
+            if (!confirm(label + ' kapsamındaki görev, personel, izin, log ve yerel ücret kalemleri sıfırlanacak. İşlem ' + (this.user.mega ? 'doğrudan uygulanacak.' : 'Mega Admin onayına gönderilecek.') + '\n\nDevam edilsin mi?')) return;
+            try {
+                const result = await this.apiRequest('operation.request', {operation:'reset', targetGumrukId:target, gumrukId:this.aktifGumruk});
+                if (result.mode === 'pending') {
+                    alert('Sıfırlama isteği Mega Admin onayına gönderildi. Talep no: ' + result.request.id);
+                    return;
+                }
+                const detail = result.result;
+                alert('Sıfırlama sonuçlandı: ' + detail.successCount + ' başarılı, ' + detail.errorCount + ' hatalı.\n' + detail.results.map(x => x.gumrukId + ': ' + x.status + (x.message ? ' — ' + x.message : '')).join('\n'));
+                if (target === 'ALL' || target === this.aktifGumruk) await this.loadFromCloud({gumrukId:this.aktifGumruk, manual:true, force:true});
+            } catch (error) { alert(error.message || 'Sıfırlama talebi gönderilemedi.'); }
         },
 
         chooseBackupRestore() {
-            if (!this.user || !this.user.mega) {
-                return alert('Yedek geri yükleme işlemini yalnızca Mega Admin yapabilir.');
-            }
+            if (!this.user || !['Admin','Mega Admin'].includes(this.user.rolEtiketi || this.user.rol)) return alert('Yedek yükleme işlemini yalnızca Admin başlatabilir.');
             document.getElementById('backup-restore-input').click();
         },
 
         async restoreBackup(file) {
-            if (!this.user || !this.user.mega) {
-                return alert('Yedek geri yükleme işlemini yalnızca Mega Admin yapabilir.');
-            }
+            if (!this.user || !['Admin','Mega Admin'].includes(this.user.rolEtiketi || this.user.rol)) return alert('Yedek yükleme işlemini yalnızca Admin başlatabilir.');
             if (!file) return;
             try {
                 const parsed = JSON.parse(await file.text());
-                const isObject = parsed && typeof parsed === 'object' && !Array.isArray(parsed);
-                const hasCoreData = isObject && Array.isArray(parsed.personeller) && Array.isArray(parsed.kayitlar) && Array.isArray(parsed.accounts);
-                if (!hasCoreData) {
-                    return alert('Seçilen dosya geçerli bir Kayseri Gümrük sistem yedeği değil. Personel, görev veya kullanıcı alanları eksik.');
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('JSON kök verisi geçersiz.');
+                const target = await this.chooseOperationTarget('Yedek geri yükleme');
+                if (!target) return;
+                const label = target === 'ALL' ? 'TÜMÜ' : (((this._root.gumrukler || []).find(g => g.id === target) || {}).kod || target);
+                if (target === 'ALL' && parsed.format !== 'multi-gumruk-backup-v1') throw new Error('TÜMÜ için tüm tenantları içeren Mega Admin yedeği seçin.');
+                const source = parsed.format === 'multi-gumruk-backup-v1' ? parsed.tenants[target] : parsed;
+                if (!source) throw new Error('Yedekte seçilen gümrüğün verisi yok.');
+                const data = source.database || source.data || source;
+                const taskCount = Array.isArray(data.kayitlar) ? data.kayitlar.length : 0;
+                const personCount = Array.isArray(data.personeller) ? data.personeller.length : 0;
+                if (!confirm(label + ' gümrüğüne yedek yüklenecek (' + taskCount + ' görev, ' + personCount + ' personel). İşlem ' + (this.user.mega ? 'doğrudan uygulanacak.' : 'Mega Admin onayına gönderilecek.') + '\n\nDevam edilsin mi?')) return;
+                const result = await this.apiRequest('operation.request', {operation:'restore', targetGumrukId:target, gumrukId:this.aktifGumruk, backup:parsed});
+                if (result.mode === 'pending') {
+                    alert('Geri yükleme isteği Mega Admin onayına gönderildi. Talep no: ' + result.request.id);
+                    return;
                 }
-
-                const summary = `Görev: ${parsed.kayitlar.length}\nPersonel: ${parsed.personeller.length}\nKullanıcı: ${parsed.accounts.length}\nİzin/Rapor: ${Array.isArray(parsed.izinler) ? parsed.izinler.length : 0}`;
-                const approved = confirm(
-                    `YEDEK GERİ YÜKLENECEK\n\n${summary}\n\nMevcut sistem verileri seçilen yedekteki verilerle değiştirilecek ve sonuç buluta gönderilecektir. İşlem öncesinde mevcut verinin güvenlik yedeği otomatik indirilecektir.\n\nDevam etmek istiyor musunuz?`
-                );
-                if (!approved) return;
-
-                // Geri yüklemeden hemen önce mevcut durumun kurtarma kopyasını indir.
-                const recoveryBlob = new Blob([JSON.stringify(this.db)], { type:'application/json;charset=utf-8' });
-                const recoveryUrl = URL.createObjectURL(recoveryBlob);
-                const recoveryLink = document.createElement('a');
-                recoveryLink.href = recoveryUrl;
-                recoveryLink.download = `Geri_Yukleme_Oncesi_Yedek_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-                document.body.appendChild(recoveryLink);
-                recoveryLink.click();
-                recoveryLink.remove();
-                setTimeout(() => URL.revokeObjectURL(recoveryUrl), 1000);
-
-                const oldTasks = (this.db.kayitlar || []).map(task => ({ id: String(task.id || (task.ref ? 'legacy:' + task.ref : '')) })).filter(x => x.id);
-                const restored = this.normalizeDb(parsed);
-                const restoredIds = new Set((restored.kayitlar || []).map(task => String(task.id || (task.ref ? 'legacy:' + task.ref : ''))).filter(Boolean));
-                const now = new Date().toISOString();
-
-                // Buluttaki daha yeni kayıtların eski yedeği ezmesini önlemek için geri yüklenen görevleri yeni sürüm olarak işaretle.
-                restored.kayitlar.forEach(task => {
-                    if (!task.id) task.id = task.ref ? 'legacy:' + task.ref : this.uuid();
-                    task.updatedAt = now;
-                    if (!task.createdAt) task.createdAt = now;
-                });
-
-                // Yedekte bulunmayan mevcut görevlerin buluttan yeniden dirilmesini engelle.
-                const tombstones = new Map();
-                (restored.deletedTaskIds || []).forEach(item => {
-                    const value = typeof item === 'string' ? { id:item, deletedAt:'1970-01-01T00:00:00.000Z' } : item;
-                    if (value && value.id) tombstones.set(String(value.id), value);
-                });
-                oldTasks.forEach(task => {
-                    if (!restoredIds.has(task.id)) tombstones.set(task.id, { id:task.id, deletedAt:now });
-                });
-                restored.deletedTaskIds = Array.from(tombstones.values());
-                restored.sistemSifirlamaZamani = now;
-                (restored.personeller || []).forEach(person => { person.updatedAt = now; });
-
-                this.db = restored;
-                this.selectedPs = [];
-                this.addLog('Sistem Yedeği Geri Yüklendi', `${file.name} dosyasından ${restored.kayitlar.length} görev ve ${restored.personeller.length} personel geri yüklendi.`);
-                this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-                await this.writeLocalDatabase(this.db);
-                localStorage.setItem(this.PENDING_KEY, '1');
-                this.render();
-                this.setSyncStatus('Geri yüklenen yedek buluta gönderiliyor…');
-                this.queueCloudWrite(0);
-                alert('Yedek başarıyla geri yüklendi. Veriler arka planda buluta gönderiliyor.');
+                const detail = result.result;
+                alert('Geri yükleme sonucu: ' + detail.successCount + ' başarılı, ' + detail.errorCount + ' hatalı.\n' + detail.results.map(x => x.gumrukId + ': ' + x.status + (x.message ? ' — ' + x.message : '')).join('\n'));
+                if (target === 'ALL' || target === this.aktifGumruk) await this.loadFromCloud({gumrukId:this.aktifGumruk, manual:true, force:true});
             } catch (error) {
                 console.error('Yedek geri yükleme hatası:', error);
-                alert('Yedek dosyası okunamadı veya JSON biçimi geçersiz.');
+                alert(error.message || 'Yedek dosyası okunamadı veya yükleme talebi reddedildi.');
             }
         },
+
+
 
         checkDekontUyarilari() {
             if (!this.user) return;
@@ -2047,7 +1987,7 @@ downloadBackup(fileName) {
                 ['İzin / rapor kayıtları', String((this.db.izinler || []).length), ''],
                 ['Kullanıcı hesapları', String((this.db.accounts || []).length), ''],
                 ['Silme işaretleri', String((this.db.deletedTaskIds || []).length), ''],
-                ['Bulut yapılandırması', this.CLOUD_URL && this.CLOUD_TOKEN ? 'Hazır ✔' : 'Eksik', this.CLOUD_URL && this.CLOUD_TOKEN ? 'health-ok' : 'health-bad']
+                ['Bulut yapılandırması', this.CLOUD_URL ? 'Hazır ✔' : 'Eksik', this.CLOUD_URL ? 'health-ok' : 'health-bad']
             ];
             target.innerHTML = cards.map(card => `<div class="health-card"><div class="health-card-title">${card[0]}</div><div class="health-card-value ${card[2]}">${card[1]}</div></div>`).join('');
             const stamp = document.getElementById('system-health-updated');
@@ -2082,6 +2022,44 @@ downloadBackup(fileName) {
 
         closeAdminManagement() {
             document.getElementById('admin-management-modal').classList.add('hidden');
+        },
+
+        async openApprovalRequests() {
+            if (!this.user || !this.user.mega) return alert('Onay taleplerini yalnızca Mega Admin görebilir.');
+            try {
+                const result = await this.apiRequest('approval.list');
+                this.renderApprovalRequests(result.onayTalepleri || []);
+                document.getElementById('approval-request-modal').classList.remove('hidden');
+            } catch (error) { alert(error.message || 'Onay talepleri alınamadı.'); }
+        },
+
+        closeApprovalRequests() { document.getElementById('approval-request-modal').classList.add('hidden'); },
+
+        renderApprovalRequests(items) {
+            const body = document.getElementById('approval-request-body');
+            if (!body) return;
+            const esc = value => this.escapeHtml(value);
+            body.innerHTML = items.length ? items.map(item => {
+                const state = item.status === 'pending' ? '<span style="color:var(--warning)">BEKLİYOR</span>' : (item.status === 'approved' ? '<span style="color:var(--success)">ONAYLANDI</span>' : '<span style="color:var(--danger)">REDDEDİLDİ</span>');
+                const kind = item.operation === 'reset' ? 'Sıfırlama' : 'Yedek geri yükleme';
+                const actions = item.status === 'pending' ? `<button class="btn btn-success" onclick="app.decideApprovalRequest('${esc(item.id)}','approve')">ONAYLA</button> <button class="btn btn-danger" onclick="app.decideApprovalRequest('${esc(item.id)}','reject')">REDDET</button>` : esc(item.decidedBy || '');
+                const result = item.result && item.result.results ? item.result.results.map(x => esc(x.gumrukId) + ': ' + esc(x.status) + (x.message ? ' — ' + esc(x.message) : '')).join('<br>') : '';
+                return `<tr><td>${esc(new Date(item.createdAt).toLocaleString('tr-TR'))}</td><td>${esc(item.createdBy)}</td><td>${esc(kind)}</td><td>${esc(item.gumrukId === 'ALL' ? 'TÜMÜ' : item.gumrukId)}</td><td>${state}</td><td>${actions}${result ? '<div style="margin-top:5px;font-size:10px">'+result+'</div>' : ''}</td></tr>`;
+            }).join('') : '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--muted)">Onay talebi bulunmuyor.</td></tr>';
+        },
+
+        async decideApprovalRequest(requestId, decision) {
+            if (!this.user || !this.user.mega) return alert('Talepleri yalnızca Mega Admin sonuçlandırabilir.');
+            const actionName = decision === 'approve' ? 'onaylamak' : 'reddetmek';
+            if (!confirm('Bu talebi ' + actionName + ' istiyor musunuz? Onaylanan işlem yalnızca talepte belirtilen gümrük(ler)e uygulanır.')) return;
+            try {
+                const result = await this.apiRequest('approval.decide', {requestId:requestId, decision:decision});
+                const operationResult = result.result;
+                if (operationResult && operationResult.results) alert('İşlem sonucu: ' + operationResult.successCount + ' başarılı, ' + operationResult.errorCount + ' hatalı.\n' + operationResult.results.map(x => x.gumrukId + ': ' + x.status + (x.message ? ' — ' + x.message : '')).join('\n'));
+                const list = await this.apiRequest('approval.list');
+                this.renderApprovalRequests(list.onayTalepleri || []);
+                if (decision === 'approve' && operationResult && operationResult.results.some(x => x.gumrukId === this.aktifGumruk && x.status === 'success')) await this.loadFromCloud({gumrukId:this.aktifGumruk,manual:true,force:true});
+            } catch (error) { alert(error.message || 'Talep sonuçlandırılamadı.'); }
         },
 
         openAdminModule(moduleName) {
@@ -2217,7 +2195,7 @@ downloadBackup(fileName) {
             if (this.simulationMode) return alert('Simülasyon açıkken yetki değiştirilemez. Önce simülasyonu uygulayın veya iptal edin.');
             this.user.roller = allowed;
             this.applyRoleLabel(role);
-            localStorage.setItem('dnm_currentUser', JSON.stringify(this.user));
+            localStorage.setItem('dnm_currentUser', JSON.stringify({user:this.user.user, rolEtiketi:this.user.rolEtiketi}));
             localStorage.setItem('dnm_gumruk_last_role_' + this.user.user, role);
             this.selectedPs = [];
             this.poolMode = false;
@@ -2277,50 +2255,6 @@ downloadBackup(fileName) {
             if (['Gümrük Müdürü', 'Gümrük Müdür Yardımcısı'].includes(r)) show('btn-log');
             document.querySelectorAll('.mega-only').forEach(el => el.classList.toggle('hidden', !this.user.mega));
             this.refreshGumrukSelect();
-        },
-
-        checkSession() {
-            const current = localStorage.getItem('dnm_currentUser');
-            if (current) {
-                let stored = null;
-                try { stored = JSON.parse(current); } catch (_) {}
-                if (stored && stored.user) {
-                    const acc = (this.db.accounts || []).find(a => a.user === stored.user);
-                    this.user = acc ? this.buildSessionUser(acc, stored.rolEtiketi || stored.rol) : stored;
-                    this.restoreLastGumruk();
-                    this.applyRoleUI();
-                    this.loadFromCloud();
-                    this.startAutoSync();
-                    this.applyDefaultTodayFilter();
-                }
-            }
-            this.render();
-        },
-
-        async login() {
-            const u = document.getElementById('username').value;
-            const p = document.getElementById('password').value;
-            let acc = this.db.accounts.find(x => x.user === u && x.pass === p);
-            if (!acc && (!Array.isArray(this.db.accounts) || this.db.accounts.length === 0)) {
-                if (!this.pullInFlight) await this.loadBootstrapFromCloud();
-                acc = this.db.accounts.find(x => x.user === u && x.pass === p);
-            }
-            if (!acc && (!Array.isArray(this.db.accounts) || this.db.accounts.length === 0)) {
-                alert('Açılış bilgileri henüz indiriliyor. Birkaç saniye bekleyip tekrar giriş yapın.');
-                return;
-            }
-            if (acc) {
-                this.user = this.buildSessionUser(acc, localStorage.getItem('dnm_gumruk_last_role_' + acc.user) || '');
-                localStorage.setItem('dnm_currentUser', JSON.stringify(this.user));
-                this.restoreLastGumruk();
-                this.applyRoleUI();
-                this.loadFromCloud();
-                this.startAutoSync();
-                this.applyDefaultTodayFilter();
-            } else {
-                alert("Hatalı kullanıcı adı veya şifre!");
-            }
-            this.render();
         },
 
         quickDateFilter(type) {
@@ -2394,16 +2328,16 @@ downloadBackup(fileName) {
             this.render();
         },
 
-        changePassword() {
+        async changePassword() {
             const newPass = prompt("Yeni Şifre Girin:");
-            if(newPass) {
-                this.user.pass = newPass;
-                const index = this.db.accounts.findIndex(a => a.user === this.user.user);
-                if(index !== -1) this.db.accounts[index].pass = newPass;
-                localStorage.setItem('dnm_currentUser', JSON.stringify(this.user));
-                this.save();
-                alert("Şifre değiştirildi.");
-            }
+            if (!newPass) return;
+            if (newPass.length < 8) return alert('Şifre en az 8 karakter olmalıdır.');
+            try {
+                const result = await this.apiRequest('auth.changePassword', {newPassword:newPass});
+                localStorage.setItem(this.SESSION_KEY, result.sessionToken);
+                this.applyServerPrincipal(result.principal);
+                alert('Şifre sunucuda güvenli biçimde güncellendi.');
+            } catch (error) { alert(error.message || 'Şifre güncellenemedi.'); }
         },
 
         selectMultiple(select) {
@@ -2806,7 +2740,7 @@ downloadBackup(fileName) {
                 mevcut.rol = roller[0];
                 mevcut.roller = roller;
                 mevcut.gumrukler = gumrukSecilen;
-                if (this.user.user === mevcut.user) { this.user.pass = pass; this.user.roller = roller; this.user.gumrukler = gumrukSecilen; localStorage.setItem('dnm_currentUser', JSON.stringify(this.user)); }
+                if (this.user.user === mevcut.user) { this.user.roller = roller; this.user.gumrukler = gumrukSecilen; }
                 alert("Hesap güncellendi.");
             } else {
                 const roller = this.orderRoles('', secilen);
@@ -2863,7 +2797,7 @@ downloadBackup(fileName) {
             acc.gumrukler = ids;
             const kod = ((this._root.gumrukler || []).find(g => g.id === gumrukId) || {}).kod || gumrukId;
             this.addLog("Yetki İşlemi", `Mega Admin tarafından ${acc.user} hesabının gümrükleri güncellendi: ${ids.map(id => ((this._root.gumrukler || []).find(g => g.id === id) || {}).kod || id).join(', ') || '-'} (${checkbox.checked ? '+' : '−'}${kod})`);
-            if (this.user.user === acc.user) { this.user.gumrukler = ids; localStorage.setItem('dnm_currentUser', JSON.stringify(this.user)); this.ensureActiveGumruk(); }
+            if (this.user.user === acc.user) { this.user.gumrukler = ids; localStorage.setItem('dnm_currentUser', JSON.stringify({user:this.user.user, rolEtiketi:this.user.rolEtiketi})); this.ensureActiveGumruk(); }
             this.save();
         },
 
@@ -3522,10 +3456,15 @@ downloadBackup(fileName) {
             this.ensureActiveGumruk();
         },
 
-        switchGumruk(id) {
+        async switchGumruk(id) {
             if (!this.user) return;
             if (!this.allowedGumrukler().includes(id) || id === this.aktifGumruk) { this.refreshGumrukSelect(); return; }
-            this.aktifGumruk = id;
+            if (localStorage.getItem(this.PENDING_KEY) === '1') {
+                await this.flushCloudWrite();
+                if (localStorage.getItem(this.PENDING_KEY) === '1') return alert('Bekleyen kayıt gönderilemedi. Gümrük değiştirilmedi.');
+            }
+            const loaded = await this.loadFromCloud({gumrukId:id, manual:true, force:true});
+            if (!loaded) { this.refreshGumrukSelect(); return; }
             this.scopeTick++;
             localStorage.setItem('dnm_gumruk_last_gumruk_' + this.user.user, id);
             this.selectedPs = [];
@@ -3944,6 +3883,120 @@ downloadBackup(fileName) {
             const el = document.getElementById('sync-status');
             if (el) el.innerText = text;
         },
+        async apiRequest(action, payload = {}) {
+            const body = Object.assign({}, payload, {
+                action,
+                gumrukId: payload.gumrukId || this.aktifGumruk || '',
+                sessionToken: action === 'auth.login' ? '' : (localStorage.getItem(this.SESSION_KEY) || ''),
+                activeRole: payload.activeRole || (this.user ? (this.user.rolEtiketi || this.user.rol || '') : '')
+            });
+            const response = await fetch(this.CLOUD_URL, {
+                method:'POST', cache:'no-cache', headers:{'Content-Type':'text/plain'}, body:JSON.stringify(body)
+            });
+            const text = await response.text();
+            if (!response.ok || /^\s*</.test(text)) throw new Error('Apps Script yanıtı alınamadı (HTTP ' + response.status + ').');
+            const result = JSON.parse(text);
+            if (!result || result.status !== 'success') {
+                const message = result && result.message ? result.message : 'API isteği başarısız.';
+                if (/oturum süresi doldu|yeniden giriş yapın|hesap güncellendi veya kaldırıldı/i.test(message)) this.expireSession(message);
+                throw new Error(message);
+            }
+            if (result.principal && this.user) this.applyServerPrincipal(result.principal);
+            return result;
+        },
+
+        applyServerPrincipal(principal) {
+            if (!principal || !principal.user) return;
+            const token = localStorage.getItem(this.SESSION_KEY) || '';
+            this.user = Object.assign({}, principal, {token:token});
+            this.user.rolEtiketi = principal.rolEtiketi || principal.rol;
+            this.user.rol = this.rolEtkin(this.user.rolEtiketi);
+            this.user.mega = this.user.rolEtiketi === 'Mega Admin';
+            localStorage.setItem('dnm_currentUser', JSON.stringify({user:this.user.user, rolEtiketi:this.user.rolEtiketi}));
+        },
+
+        expireSession(message) {
+            if (!localStorage.getItem(this.SESSION_KEY)) return;
+            localStorage.removeItem(this.SESSION_KEY);
+            localStorage.removeItem('dnm_currentUser');
+            if (this.syncInterval) clearInterval(this.syncInterval);
+            this.syncInterval = null;
+            this.user = null;
+            this.initialCloudLoadDone = false;
+            if (message) this.setSyncStatus(message);
+            this.render();
+        },
+
+        logout() {
+            localStorage.removeItem(this.SESSION_KEY);
+            localStorage.removeItem('dnm_currentUser');
+            if (this.syncInterval) clearInterval(this.syncInterval);
+            this.syncInterval = null;
+            location.reload();
+        },
+
+        async login() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            const preferredRole = localStorage.getItem('dnm_gumruk_last_role_' + username) || '';
+            try {
+                this.setSyncStatus('Güvenli oturum açılıyor…');
+                let auth;
+                try { auth = await this.apiRequest('auth.login', {username:username, password:password, activeRole:preferredRole}); }
+                catch (error) {
+                    if (!preferredRole || !/rol hesabınıza tanımlı değil/i.test(error.message || '')) throw error;
+                    auth = await this.apiRequest('auth.login', {username:username, password:password});
+                }
+                localStorage.setItem(this.SESSION_KEY, auth.sessionToken);
+                this.applyServerPrincipal(auth.principal);
+                const meta = await this.apiRequest('auth.me');
+                this._serverGumrukler = meta.gumrukler || [];
+                const saved = localStorage.getItem('dnm_gumruk_last_gumruk_' + this.user.user);
+                this.aktifGumruk = this._serverGumrukler.some(g => g.id === saved) ? saved : ((this._serverGumrukler[0] || {}).id || '');
+                if (!this.aktifGumruk) throw new Error('Hesabınıza erişilebilir bir gümrük atanmamış. Mega Admin ile görüşün.');
+                this.selectedPs = [];
+                this.applyRoleUI();
+                await this.loadFromCloud({initial:true, gumrukId:this.aktifGumruk});
+                this.startAutoSync();
+                this.applyDefaultTodayFilter();
+                document.getElementById('password').value = '';
+                this.render();
+            } catch (error) {
+                console.error('Giriş hatası:', error);
+                alert(error.message || 'Kullanıcı adı veya şifre hatalı.');
+            }
+        },
+
+        async checkSession() {
+            const token = localStorage.getItem(this.SESSION_KEY);
+            if (!token) { this.user = null; this.render(); return false; }
+            try {
+                const saved = JSON.parse(localStorage.getItem('dnm_currentUser') || '{}');
+                const role = saved.rolEtiketi || '';
+                const meta = await this.apiRequest('auth.me', {activeRole:role});
+                this._serverGumrukler = meta.gumrukler || [];
+                this.applyServerPrincipal(meta.principal);
+                const last = localStorage.getItem('dnm_gumruk_last_gumruk_' + this.user.user);
+                const pendingTenant = localStorage.getItem(this.PENDING_KEY) === '1' ? this._root.tenantId : '';
+                const preferredTenant = pendingTenant || last;
+                this.aktifGumruk = this._serverGumrukler.some(g => g.id === preferredTenant) ? preferredTenant : ((this._serverGumrukler[0] || {}).id || '');
+                if (!this.aktifGumruk) throw new Error('Hesabınıza erişilebilir gümrük atanmamış.');
+                this.applyRoleUI();
+                if (localStorage.getItem(this.PENDING_KEY) === '1') {
+                    await this.flushCloudWrite();
+                    if (localStorage.getItem(this.PENDING_KEY) === '1') throw new Error('Bekleyen kayıt sunucuya gönderilemedi.');
+                }
+                await this.loadFromCloud({initial:true, gumrukId:this.aktifGumruk});
+                this.startAutoSync();
+                this.applyDefaultTodayFilter();
+                this.render();
+                return true;
+            } catch (error) {
+                console.error('Oturum doğrulama hatası:', error);
+                this.expireSession('Oturum kapandı — yeniden giriş yapın.');
+                return false;
+            }
+        },
 
         save() {
             if (this.isMaintenanceBlocked(true)) {
@@ -3952,271 +4005,143 @@ downloadBackup(fileName) {
                 return false;
             }
             if (this.simulationMode) {
-                this.lastLocalChange = Date.now();
-                this.render();
-                this.updateSimulationUI();
-                return true;
+                this.lastLocalChange = Date.now(); this.render(); this.updateSimulationUI(); return true;
+            }
+            if (!this.user || !localStorage.getItem(this.SESSION_KEY)) {
+                this.setSyncStatus('Kaydetmek için oturum açın.'); return false;
             }
             this.lastLocalChange = Date.now();
             const changedVersions = this.prepareTaskTimestamps();
             this.markPendingTaskVersions(changedVersions);
-            this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-            this.writeLocalDatabase(this.db);
+            const localSnapshot = JSON.parse(JSON.stringify(this._root));
+            (localSnapshot.accounts || []).forEach(account => { if (account) delete account.pass; });
+            this.lastPersistedDb = localSnapshot;
+            this.writeLocalDatabase(localSnapshot);
             localStorage.setItem(this.PENDING_KEY, '1');
-            this.render();
-            this.updatePendingSyncWarning();
-            this.setSyncStatus('Buluta gönderim bekliyor…');
-            this.queueCloudWrite();
+            this.render(); this.updatePendingSyncWarning();
+            this.setSyncStatus('Buluta gönderim bekliyor…'); this.queueCloudWrite();
+            return true;
         },
 
         queueCloudWrite(delay = 700) {
-            if (this.simulationMode) return;
+            if (this.simulationMode || !this.user) return;
             if (this.writeTimer) clearTimeout(this.writeTimer);
             this.writeTimer = setTimeout(() => this.flushCloudWrite(), delay);
         },
 
         async flushCloudWrite() {
-            if (this.simulationMode) return;
-            if (this.writeInFlight) {
-                this.writeAgain = true;
-                return;
-            }
-            if (this.pullInFlight) {
-                this.queueCloudWrite(500);
-                return;
-            }
-            this.writeInFlight = true;
-            this.writeAgain = false;
-            const snapshot = JSON.parse(JSON.stringify(this.db));
-            this.setSyncStatus('Buluta yazılıyor…');
+            if (this.simulationMode || !this.user) return false;
+            if (this.writeInFlight) { this.writeAgain = true; return false; }
+            if (this.pullInFlight) { this.queueCloudWrite(500); return false; }
+            this.writeInFlight = true; this.writeAgain = false;
+            const snapshot = JSON.parse(JSON.stringify(this._root));
+            this.setSyncStatus('Seçili gümrüğe yazılıyor…');
             try {
-                const response = await fetch(this.CLOUD_URL, {
-                    method: 'POST',
-                    cache: 'no-cache',
-                    headers: { 'Content-Type': 'text/plain' },
-                    body: JSON.stringify({
-                        user: this.user ? this.user.user : 'Sistem',
-                        action: 'Veri Yedekleme',
-                        payload: snapshot,
-                        token: this.CLOUD_TOKEN
-                    })
-                });
-                const answer = await response.json();
-                if (!response.ok || !answer || answer.status !== 'success') throw new Error((answer && answer.message) || 'Sunucu yazmayı onaylamadı');
+                const answer = await this.apiRequest('data.save', {gumrukId:this.aktifGumruk, database:snapshot});
+                this.cloudRevision = Number(answer.serverRevision || this.cloudRevision || 0);
+                localStorage.setItem('dnm_gumruk_cloud_revision_v1', String(this.cloudRevision));
                 localStorage.setItem('dnm_gumruk_last_cloud_write_at', new Date().toISOString());
-                const unchanged = JSON.stringify(snapshot) === JSON.stringify(this.db);
+                const unchanged = JSON.stringify(snapshot) === JSON.stringify(this._root);
+                if (answer.database && Array.isArray(answer.database.accounts)) this._root.accounts = answer.database.accounts;
+                this.lastPersistedDb = JSON.parse(JSON.stringify(this._root));
+                await this.writeLocalDatabase(this._root);
                 this.clearSyncedTaskVersions(snapshot);
-                if (unchanged && !this.writeAgain) localStorage.removeItem(this.PENDING_KEY);
-                else this.writeAgain = true;
+                if (unchanged && !this.writeAgain) localStorage.removeItem(this.PENDING_KEY); else this.writeAgain = true;
                 this.updatePendingSyncWarning();
-                this.setSyncStatus('Buluta yazıldı ✔ (' + new Date().toLocaleTimeString() + ')');
-                if (!this.initialCloudLoadDone) setTimeout(() => this.loadFromCloud({ initial: true }), 0);
+                this.setSyncStatus('Seçili gümrük kaydedildi ✔ (' + new Date().toLocaleTimeString() + ')');
+                return true;
             } catch (error) {
                 console.error('Bulut yazma hatası:', error);
-                localStorage.setItem(this.PENDING_KEY, '1');
-                this.updatePendingSyncWarning();
-                this.setSyncStatus('Gönderim bekliyor — bağlantı hatası');
-                this.writeAgain = true;
-                setTimeout(() => this.queueCloudWrite(0), 15000);
+                localStorage.setItem(this.PENDING_KEY, '1'); this.updatePendingSyncWarning();
+                this.setSyncStatus('Gönderim bekliyor — ' + (error.message || 'bağlantı hatası'));
+                this.writeAgain = true; setTimeout(() => this.queueCloudWrite(0), 15000); return false;
             } finally {
                 this.writeInFlight = false;
                 if (this.writeAgain) this.queueCloudWrite(100);
             }
         },
 
-        async fetchCloudJsonWithRetry(url, attempts = 4) {
-            let lastError;
-            for (let attempt = 0; attempt < attempts; attempt++) {
-                try {
-                    const separator = url.includes('?') ? '&' : '?';
-                    const response = await fetch(url + separator + '_retry=' + Date.now() + '_' + attempt, { cache:'no-store' });
-                    const text = await response.text();
-                    if (!response.ok) throw new Error('Bulut HTTP ' + response.status);
-                    if (/^\s*</.test(text)) throw new Error('Bulut JSON yerine geçici HTML yanıtı döndürdü');
-                    return JSON.parse(text);
-                } catch (error) {
-                    lastError = error;
-                    if (attempt + 1 < attempts) {
-                        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-                    }
-                }
-            }
-            throw lastError || new Error('Bulut yanıtı alınamadı');
-        },
-
-        async fetchFullCloudDatabase() {
-            // Geçmiş arşiv arka planda mevcut tam GET ile indirilir.
-            const fullUrl = this.CLOUD_URL + '?token=' + encodeURIComponent(this.CLOUD_TOKEN) + '&_ts=' + Date.now();
-            const fullDatabase = await this.fetchCloudJsonWithRetry(fullUrl, 10);
-            if (fullDatabase && fullDatabase.status === 'error') throw new Error(fullDatabase.message || 'Bulut verisi alınamadı.');
-            if (!fullDatabase || !Array.isArray(fullDatabase.kayitlar) || !Array.isArray(fullDatabase.personeller)) {
-                throw new Error('Buluttan gelen tam veritabanı eksik veya geçersiz.');
-            }
-            return fullDatabase;
+        async fetchFullCloudDatabase(gumrukId = this.aktifGumruk) {
+            const data = await this.apiRequest('data.load', {gumrukId:gumrukId});
+            if (!data.database || !Array.isArray(data.database.kayitlar) || !Array.isArray(data.database.personeller)) throw new Error('Tenant verisi eksik veya geçersiz.');
+            return data;
         },
 
         async loadBootstrapFromCloud() {
-            if (this.pullInFlight) return false;
-            this.pullInFlight = true;
-            this.setSyncStatus('Açılış bilgileri alınıyor…');
-            try {
-                const url = this.CLOUD_URL + '?token=' + encodeURIComponent(this.CLOUD_TOKEN) + '&mode=bootstrap&_ts=' + Date.now();
-                const bootstrap = await this.fetchCloudJsonWithRetry(url, 6);
-                if (bootstrap && bootstrap.status === 'error') throw new Error(bootstrap.message || 'Açılış bilgileri alınamadı.');
-                if (!bootstrap || !Array.isArray(bootstrap.accounts) || !Array.isArray(bootstrap.personeller)) {
-                    throw new Error('Açılış paketi eksik veya geçersiz.');
-                }
-                this.db = this.mergeDatabases(this.db, bootstrap);
-                this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-                await this.writeLocalDatabase(this.db);
-                this.cloudRevision = Number(bootstrap.serverRevision || 0);
-                this.cloudCursor = bootstrap.serverCursor || bootstrap.serverUpdatedAt || new Date().toISOString();
-                localStorage.setItem('dnm_gumruk_cloud_revision_v1', String(this.cloudRevision));
-                localStorage.setItem('dnm_gumruk_cloud_cursor_v1', this.cloudCursor);
-                this.sortPersoneller();
-                this.render();
-                this.setSyncStatus(bootstrap.bootstrap ? ('Açılış hazır ✔ (' + (bootstrap.bootstrapMonth || 'son ay') + ')') : 'Bulut birleştirildi ✔');
-                if (!bootstrap.bootstrap) this.initialCloudLoadDone = true;
-                return true;
-            } catch (error) {
-                console.error('Hızlı açılış hatası:', error);
-                this.setSyncStatus('Açılış bilgileri alınamadı — bağlantı hatası');
-                return false;
-            } finally {
-                this.pullInFlight = false;
-            }
+            if (!this.user) return false;
+            return this.loadFromCloud({initial:true});
         },
 
         async loadFromCloud(options = {}) {
-            if (this.simulationMode) {
-                if (options.manual === true) alert('Simülasyon açıkken buluttan veri alınmaz. Önce simülasyonu uygulayın veya iptal edin.');
-                return;
+            if (this.simulationMode) return;
+            const manual = options.manual === true, gumrukId = options.gumrukId || this.aktifGumruk;
+            if (!this.user || !gumrukId) return false;
+            if (!manual && !options.force && this.initialCloudLoadDone && gumrukId === this.aktifGumruk && options.initial !== true) return true;
+            if (this.writeInFlight || (localStorage.getItem(this.PENDING_KEY) === '1' && gumrukId === this.aktifGumruk && !options.force)) {
+                if (manual) alert('Önce bekleyen kayıt gönderilmeli.');
+                this.queueCloudWrite(0); return false;
             }
-            const manual = options.manual === true;
-            if (!manual && this.initialCloudLoadDone) return;
-            if (this.writeInFlight || localStorage.getItem(this.PENDING_KEY) === '1') {
-                if (manual) this.setSyncStatus('Önce bekleyen kayıt gönderiliyor…');
-                this.queueCloudWrite(0);
-                if (manual) alert('Bekleyen yerel kayıtlar buluta gönderildikten sonra tekrar deneyin.');
-                return;
-            }
-            if (this.pullInFlight) return;
-            this.pullInFlight = true;
-            this.setSyncStatus(manual ? 'Bulut güncelleniyor…' : 'Bulut verisi alınıyor…');
+            if (this.pullInFlight) return false;
+            this.pullInFlight = true; this.setSyncStatus('Gümrük verisi alınıyor…');
             try {
-                const cloudData = await this.fetchFullCloudDatabase();
-                if (cloudData && cloudData.status === 'error') throw new Error(cloudData.message || 'Bulut verisi alınamadı');
-                this.db = this.mergeDatabases(this.db, cloudData);
-                this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-                await this.writeLocalDatabase(this.db);
+                const answer = await this.fetchFullCloudDatabase(gumrukId);
+                this.aktifGumruk = gumrukId;
+                this._serverGumrukler = answer.database.gumrukler || this._serverGumrukler || [];
+                this.db = answer.database;
+                this.lastPersistedDb = JSON.parse(JSON.stringify(this._root));
+                await this.writeLocalDatabase(this._root);
                 this.initialCloudLoadDone = true;
-                localStorage.setItem('dnm_gumruk_last_cloud_read_at', new Date().toISOString());
-                this.cloudCursor = cloudData.serverCursor || cloudData.serverUpdatedAt || new Date().toISOString();
-                localStorage.setItem('dnm_gumruk_cloud_cursor_v1', this.cloudCursor);
-                this.cloudRevision = Number(cloudData.serverRevision || 0);
+                this.cloudRevision = Number(answer.serverRevision || 0);
+                this.cloudCursor = new Date().toISOString();
                 localStorage.setItem('dnm_gumruk_cloud_revision_v1', String(this.cloudRevision));
-                this.sortPersoneller();
-                this.render();
-                this.setSyncStatus('Bulut birleştirildi ✔ (' + new Date().toLocaleTimeString() + ')');
+                localStorage.setItem('dnm_gumruk_cloud_cursor_v1', this.cloudCursor);
+                localStorage.setItem('dnm_gumruk_last_cloud_read_at', new Date().toISOString());
+                if (this.user) localStorage.setItem('dnm_gumruk_last_gumruk_' + this.user.user, gumrukId);
+                this.sortPersoneller(); this.render(); this.setSyncStatus('Gümrük verisi alındı ✔');
+                return true;
             } catch (error) {
-                console.error('Bulut okuma hatası:', error);
-                this.setSyncStatus('Yerel veriyle çalışılıyor — bağlantı hatası');
-            } finally {
-                this.pullInFlight = false;
-            }
+                console.error('Tenant verisi okunamadı:', error);
+                this.setSyncStatus('Gümrük verisi alınamadı — ' + (error.message || 'bağlantı hatası'));
+                if (manual) alert(error.message || 'Gümrük verisi alınamadı.');
+                return false;
+            } finally { this.pullInFlight = false; }
         },
 
         startAutoSync() {
             if (this.syncInterval) clearInterval(this.syncInterval);
             this.syncInterval = setInterval(async () => {
-                await this.loadMaintenanceStatus();
-                await this.loadChangesFromCloud();
+                await this.loadMaintenanceStatus(); await this.loadChangesFromCloud();
             }, 10000);
         },
 
         async loadMaintenanceStatus() {
-            if (this.simulationMode) return;
-            if (!this.initialCloudLoadDone || !this.user || this.writeInFlight || this.maintenanceCheckInFlight) return;
-            if (localStorage.getItem(this.PENDING_KEY) === '1') return;
+            if (this.simulationMode || !this.initialCloudLoadDone || !this.user || this.writeInFlight || this.maintenanceCheckInFlight) return;
             this.maintenanceCheckInFlight = true;
             try {
-                const fullData = await this.fetchCloudJsonWithRetry(this.CLOUD_URL + '?token=' + encodeURIComponent(this.CLOUD_TOKEN) +
-                    '&mode=status&_ts=' + Date.now());
-                if (fullData && fullData.status === 'error') throw new Error(fullData.message || 'Bakım durumu alınamadı');
-                const remoteMode = fullData.maintenanceMode || { enabled:false };
-                const localMode = this.db.maintenanceMode || { enabled:false };
-                if (JSON.stringify(remoteMode) !== JSON.stringify(localMode)) {
-                    const justEnabled = remoteMode.enabled && !localMode.enabled;
-                    this.db.maintenanceMode = remoteMode;
-                    this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-                    await this.writeLocalDatabase(this.db);
-                    this.render();
-                    if (justEnabled && !this.user.mega) {
-                        alert('🧰 Patron sistem bakımı yapıyor. Bakım bitene kadar kayıt ekleme, değiştirme ve silme işlemleri durduruldu.');
-                    }
+                const result = await this.apiRequest('data.status', {gumrukId:this.aktifGumruk});
+                const remote = result.maintenanceMode || {enabled:false}, local = this.db.maintenanceMode || {enabled:false};
+                if (JSON.stringify(remote) !== JSON.stringify(local)) {
+                    const enabled = remote.enabled && !local.enabled; this.db.maintenanceMode = remote;
+                    this.lastPersistedDb = JSON.parse(JSON.stringify(this._root)); await this.writeLocalDatabase(this._root); this.render();
+                    if (enabled && !this.user.mega) alert('Bakım modu açıldı. Kayıt değişiklikleri geçici olarak durduruldu.');
                 }
-                localStorage.setItem('dnm_gumruk_last_cloud_read_at', new Date().toISOString());
-            } catch (error) {
-                console.error('Bakım durumu kontrolü hatası:', error);
-            } finally {
-                this.maintenanceCheckInFlight = false;
-            }
+            } catch (error) { console.error('Bakım durumu alınamadı:', error); }
+            finally { this.maintenanceCheckInFlight = false; }
         },
 
         async loadChangesFromCloud() {
-            if (this.simulationMode) return;
-            if (!this.initialCloudLoadDone || !this.user || this.pullInFlight || this.writeInFlight) return;
-            if (localStorage.getItem(this.PENDING_KEY) === '1') return;
-            this.pullInFlight = true;
-            let hasMore = false;
+            if (this.simulationMode || !this.initialCloudLoadDone || !this.user || this.pullInFlight || this.writeInFlight || localStorage.getItem(this.PENDING_KEY) === '1') return;
             try {
-                const url = this.CLOUD_URL + '?token=' + encodeURIComponent(this.CLOUD_TOKEN) +
-                    '&afterRevision=' + encodeURIComponent(String(this.cloudRevision || 0)) +
-                    '&_ts=' + Date.now();
-                const delta = await this.fetchCloudJsonWithRetry(url);
-                if (delta && delta.status === 'error') throw new Error(delta.message || 'Değişiklikler alınamadı');
-                const changedCount = (delta.kayitlar || []).length + (delta.deletedTaskIds || []).length;
-                const maintenanceChanged = delta.maintenanceMode && JSON.stringify(delta.maintenanceMode) !== JSON.stringify(this.db.maintenanceMode || { enabled:false });
-                const normAyar = v => { const c = JSON.parse(JSON.stringify(v || {})); Object.keys(c).forEach(id => this.fillGumrukAyarDefaults(c[id])); return c; };
-                const settingsChanged = (delta.gumrukAyarlari !== undefined && this.stableStringify(normAyar(delta.gumrukAyarlari)) !== this.stableStringify(this._root.gumrukAyarlari || {})) ||
-                    (Array.isArray(delta.gumrukler) && this.stableStringify(delta.gumrukler) !== this.stableStringify(this._root.gumrukler || []));
-                const accountsChanged = Array.isArray(delta.accounts) && delta.accounts.length > 0 && (() => {
-                    const yerel = new Map((this._root.accounts || []).map(a => [a.user, a]));
-                    if (yerel.size !== delta.accounts.length) return true;
-                    const sirali = v => JSON.stringify([...v].sort());
-                    return delta.accounts.some(d => {
-                        const l = yerel.get(d.user);
-                        if (!l || l.pass !== d.pass) return true;
-                        if (Array.isArray(d.gumrukler) && sirali(d.gumrukler) !== sirali(l.gumrukler || [])) return true;
-                        if (Array.isArray(d.roller) && sirali(d.roller) !== sirali(l.roller || [])) return true;
-                        return false;
-                    });
-                })();
-                const personnelSignature = list => JSON.stringify((list || []).map(person => [this.personKey(person), person.updatedAt || '', (person.personelGecmisi || []).length]));
-                const personnelChanged = Array.isArray(delta.personeller) && personnelSignature(delta.personeller) !== personnelSignature(this._root.personeller);
-                if (changedCount > 0 || maintenanceChanged || settingsChanged || personnelChanged || accountsChanged) {
-                    this.db = this.mergeDatabases(this.db, delta);
-                    this.lastPersistedDb = JSON.parse(JSON.stringify(this.db));
-                    await this.writeLocalDatabase(this.db);
-                    this.render();
-                }
-                this.cloudCursor = delta.serverCursor || this.cloudCursor;
-                if (this.cloudCursor) localStorage.setItem('dnm_gumruk_cloud_cursor_v1', this.cloudCursor);
-                this.cloudRevision = Number(delta.serverRevision || this.cloudRevision || 0);
-                localStorage.setItem('dnm_gumruk_cloud_revision_v1', String(this.cloudRevision));
+                const status = await this.apiRequest('data.status', {gumrukId:this.aktifGumruk});
+                const revision = Number(status.serverRevision || 0);
+                if (revision > Number(this.cloudRevision || 0)) await this.loadFromCloud({force:true, gumrukId:this.aktifGumruk});
+                this.cloudRevision = Number(this.cloudRevision || revision);
+                localStorage.setItem('dnm_gumruk_cloud_revision_v1', String(revision));
                 localStorage.setItem('dnm_gumruk_last_cloud_read_at', new Date().toISOString());
-                hasMore = delta.hasMore === true;
-                this.setSyncStatus(changedCount > 0 || maintenanceChanged || settingsChanged || personnelChanged
-                    ? (changedCount + (maintenanceChanged ? ' + bakım durumu' : '') + (settingsChanged ? ' + sistem ayarı' : '') + (personnelChanged ? ' + personel' : '') + ' bulut değişikliği alındı ✔')
-                    : 'Veriler güncel ✔');
-            } catch (error) {
-                console.error('Değişiklik kontrolü hatası:', error);
-                this.setSyncStatus('Bağlantı bekleniyor — yerel kayıtlar güvende');
-            } finally {
-                this.pullInFlight = false;
-                if (hasMore) setTimeout(() => this.loadChangesFromCloud(), 100);
-            }
+                this.setSyncStatus('Seçili gümrük güncel ✔');
+            } catch (error) { console.error('Tenant değişiklik kontrolü hatası:', error); }
         },
+
 
         async initialize() {
             this.setupTaskEnterShortcut();
@@ -4244,18 +4169,9 @@ downloadBackup(fileName) {
             const pending = localStorage.getItem(this.PENDING_KEY) === '1';
             // Temmuz sürümündeki çalışan açılış: yerel veri ve kayıtlı oturum
             // hemen gösterilir; ilk bulut kontrolü ekran açıldıktan sonra arkada yürür.
-            this.checkSession();
+            await this.checkSession();
             this.hideSplash();
-            if (!this.user && !pending) {
-                const bootstrapLoaded = await this.loadBootstrapFromCloud();
-                if (bootstrapLoaded && !this.initialCloudLoadDone) {
-                    setTimeout(() => this.loadFromCloud({ initial: true }), 0);
-                }
-            }
-            if (pending) {
-                this.setSyncStatus('Bekleyen kayıt yeniden gönderiliyor…');
-                this.queueCloudWrite(0);
-            }
+            if (pending && !this.user) this.setSyncStatus('Bekleyen yerel gönderi için yeniden giriş yapın.');
         },
 
         // ── Veri sürümü: yeni sürümde eski yerel kopyayı sil ──
@@ -4280,26 +4196,7 @@ downloadBackup(fileName) {
 
         // Şifresi değişen veya hesabı silinen kullanıcının açık oturumunu düşürür.
         validateSession() {
-            if (!this.user || this.sessionDropping) return true;
-            const accounts = this.db.accounts || [];
-            if (!accounts.length) return true; // hesap listesi henüz inmediyse oturumu düşürme
-            const acc = accounts.find(a => a.user === this.user.user);
-            if (acc && acc.pass === this.user.pass) {
-                const roller = this.getAccountRoles(acc);
-                this.user.roller = roller;
-                this.user.gumrukler = Array.isArray(acc.gumrukler) ? acc.gumrukler : [];
-                if (!roller.includes(this.user.rolEtiketi || this.user.rol)) {
-                    this.applyRoleLabel(roller[0]);
-                    localStorage.setItem('dnm_currentUser', JSON.stringify(this.user));
-                    this.applyRoleUI();
-                }
-                return true;
-            }
-            this.sessionDropping = true;
-            localStorage.removeItem('dnm_currentUser');
-            alert('Şifreniz değiştirilmiş veya hesabınız kaldırılmış. Lütfen yeni bilgilerinizle tekrar giriş yapın.');
-            this.reloadPage();
-            return false;
+            return !!(this.user && localStorage.getItem(this.SESSION_KEY));
         },
 
         updateAccountField(index, field, value) {
@@ -4307,16 +4204,17 @@ downloadBackup(fileName) {
             if (!acc || !['user', 'pass'].includes(field)) return;
             if (!this.user || !this.user.mega) { alert('Hesap bilgilerini yalnızca Mega Admin değiştirebilir.'); this.render(); return; }
             const yeni = String(value);
+            if (field === 'pass' && !yeni) return;
             if (field === 'user') {
                 if (!yeni.trim()) { alert('Kullanıcı adı boş bırakılamaz.'); this.render(); return; }
                 if (this.db.accounts.some((a, i) => i !== index && a.user === yeni)) { alert('Bu kullanıcı adı zaten kullanılıyor.'); this.render(); return; }
             }
-            if (field === 'pass' && !yeni) { alert('Şifre boş bırakılamaz.'); this.render(); return; }
+            if (field === 'pass' && !yeni) return;
             const kendisi = this.user && acc.user === this.user.user;
             acc[field] = yeni;
             if (kendisi) {
-                this.user[field] = yeni;
-                localStorage.setItem('dnm_currentUser', JSON.stringify(this.user));
+                if (field === 'user') this.user.user = yeni;
+                localStorage.setItem('dnm_currentUser', JSON.stringify({user:this.user.user, rolEtiketi:this.user.rolEtiketi}));
             }
             this.save();
         },
@@ -5093,7 +4991,7 @@ downloadBackup(fileName) {
                     const sadeceGenel = roller.every(r => this.GLOBAL_ROLLER.includes(r));
                     const ids = Array.isArray(a.gumrukler) ? a.gumrukler : [];
                     const gumrukHtml = sadeceGenel ? '<i>tüm gümrükler (Mega Admin / Denetim)</i>' : (this._root.gumrukler || []).map(g => `<label style="display:inline-flex;align-items:center;gap:3px;margin:2px 10px 2px 0;font-size:10px;white-space:nowrap;cursor:pointer;"><input type="checkbox" style="width:auto;margin:0;" ${ids.includes(g.id) ? 'checked' : ''} onchange="app.toggleAccountGumruk(${i},'${this.escapeHtml(g.id)}',this)">${this.escapeHtml(g.kod)}</label>`).join('');
-                    return `<tr><td><input value="${this.escapeHtml(a.user)}" onchange="app.updateAccountField(${i},'user',this.value)"></td><td><input type="password" value="${this.escapeHtml(a.pass)}" onchange="app.updateAccountField(${i},'pass',this.value)"></td><td>${rolHtml}<div style="margin-top:4px; border-top:1px dashed #333; padding-top:4px; font-size:10px; color:var(--muted);">🏛 Gümrük: ${gumrukHtml}</div></td><td><button class="btn btn-danger" onclick="app.deleteAccount(${i})">SİL</button></td></tr>`;
+                    return `<tr><td><input value="${this.escapeHtml(a.user)}" onchange="app.updateAccountField(${i},'user',this.value)"></td><td><input type="password" value="" placeholder="Yeni şifre (isteğe bağlı)" autocomplete="new-password" onchange="app.updateAccountField(${i},'pass',this.value)"></td><td>${rolHtml}<div style="margin-top:4px; border-top:1px dashed #333; padding-top:4px; font-size:10px; color:var(--muted);">🏛 Gümrük: ${gumrukHtml}</div></td><td><button class="btn btn-danger" onclick="app.deleteAccount(${i})">SİL</button></td></tr>`;
                 }).join('');
                 this.renderGumrukBoxes();
                 this.renderAccountFilter();
@@ -5767,18 +5665,28 @@ downloadBackup(fileName) {
             <button class="admin-menu-tile" onclick="app.openAdminModule('personnel')">👥 Personel Kayıt & Düzenleme</button>
             <button class="admin-menu-tile" onclick="app.openAdminModule('fees')">💰 Hizmet Ücret Kalemleri</button>
             <button class="admin-menu-tile mega-only" onclick="app.openAdminModule('users')">🔐 Sistem Giriş Yetkileri<br><small style="color:var(--muted)">Kullanıcılar</small></button>
+            <button class="admin-menu-tile mega-only" onclick="app.openApprovalRequests()">📥 Onay Talepleri<br><small style="color:var(--muted)">Sıfırlama ve yedek yükleme</small></button>
             <button id="admin-sef-toggle-tile" class="admin-menu-tile" onclick="app.toggleSefApprovalFromMenu()">✅ Şef Onayını Devre Dışı Bırak</button>
             <button id="admin-maintenance-toggle-tile" class="admin-menu-tile mega-only" onclick="app.toggleMaintenanceMode()">🧰 Bakım Modunu Aç</button>
             <button class="admin-menu-tile mega-only" onclick="app.openSystemHealth()">🩺 Sistem Sağlık Ekranı<br><small style="color:var(--muted)">Bağlantı, senkronizasyon ve kayıt durumu</small></button>
             <button class="admin-menu-tile mega-only" onclick="app.hardBackup()">💾 Yedekle</button>
-            <button class="admin-menu-tile mega-only" onclick="app.chooseBackupRestore()">♻️ Yedeği Geri Yükle</button>
-            <button id="admin-reset-tile" class="admin-menu-tile mega-only" style="border-color:var(--danger);" onclick="app.resetSystem()">🧨 Sistemi Sıfırla<br><small style="color:#ff6b6b">Önce yedek indirir, sonra personel, görev, izin ve logları siler</small></button>
+            <button class="admin-menu-tile" onclick="app.chooseBackupRestore()">♻️ Yedek Yükleme Talebi<br><small style="color:var(--muted)">Admin yüklemesi Mega Admin onayına gider</small></button>
+            <button id="admin-reset-tile" class="admin-menu-tile" style="border-color:var(--danger);" onclick="app.resetSystem()">🧨 Sıfırlama Talebi<br><small style="color:#ff6b6b">Admin talebi Mega Admin onayına gider</small></button>
             <button class="admin-menu-tile" onclick="app.closeAdminManagement(); app.openAnalizMerkezi()">🔍 Personel Analiz Merkezi</button>
             <button class="admin-menu-tile" onclick="app.closeAdminManagement(); app.openLogMerkezi()">📜 Sistem Log Merkezi</button>
             <button id="admin-simulator-tile" class="admin-menu-tile mega-only" onclick="app.toggleSimulation()">🧪 Deneme Simülatörü<br><small style="color:var(--muted)">Buluta göndermeden görev ve tutar denemesi yap</small></button>
             <button id="admin-pool-toggle-tile" class="admin-menu-tile" onclick="app.togglePoolAccrualPermission()">🏛️ Müdürlük Modunu Aç<br><small style="color:var(--muted)">Müdürlük tahakkuk kaydına izin ver</small></button>
             <button id="admin-missing-receipts-tile" class="admin-menu-tile" onclick="app.closeAdminManagement(); app.showUyariModal()">🔔 Eksik Dekontlar <span style="color:var(--danger)">(<span id="admin-uyari-sayi">0</span>)</span></button>
         </div>
+    </div>
+</div>
+<div id="approval-request-modal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:10025;display:flex;justify-content:center;align-items:center;backdrop-filter:blur(10px);">
+    <div style="background:#0d1117;width:94%;max-width:1100px;max-height:90vh;overflow:auto;border:1px solid var(--accent);border-radius:16px;padding:24px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--border);padding-bottom:12px;margin-bottom:12px;">
+            <div><h2 style="color:var(--accent);margin:0;">Sistem Yönetimi → Onay Talepleri</h2><small style="color:var(--muted);">Admin sıfırlama ve yedek yükleme talepleri. Onay, yalnızca belirtilen tenant sekmesini etkiler.</small></div>
+            <div style="display:flex;gap:8px;"><button class="btn btn-primary" onclick="app.openApprovalRequests()">YENİLE</button><button class="btn btn-danger" onclick="app.closeApprovalRequests()">KAPAT [X]</button></div>
+        </div>
+        <div style="overflow:auto;"><table style="width:100%;font-size:11px;border-collapse:collapse;"><thead><tr style="text-align:left;color:var(--accent);"><th>Tarih</th><th>Talep Eden</th><th>İşlem</th><th>Hedef Gümrük</th><th>Durum</th><th>Karar / Sonuç</th></tr></thead><tbody id="approval-request-body"></tbody></table></div>
     </div>
 </div>
 <button id="admin-module-return" class="btn btn-success hidden" style="position:fixed; right:24px; bottom:24px; z-index:10010; padding:12px 18px; box-shadow:var(--accent-glow);" onclick="app.returnToAdminManagement()">🛠️ YÖNETİM MENÜSÜNE DÖN</button>
